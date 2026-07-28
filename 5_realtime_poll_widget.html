@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Real-Time Poll Widget</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.23.4/babel.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --surface: #171a21; --surface-hi: #1f232c; --border: #2a2f3a;
+    --text: #e7e9ee; --text-dim: #9aa1ad; --accent: #5b8def; --danger: #e05a5a; --success: #4caf7d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #root { max-width: 560px; margin: 0 auto; padding: 24px 16px 60px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--text-dim); font-size: 13px; margin-bottom: 6px; }
+  .conn-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); margin-bottom: 18px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+  .option-row { margin-bottom: 14px; }
+  .option-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  .option-label { font-size: 14px; font-weight: 600; }
+  .option-count { font-size: 13px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .option-count.bump { animation: bump 0.35s ease; color: var(--accent); }
+  @keyframes bump { 0% { transform: scale(1); } 40% { transform: scale(1.25); } 100% { transform: scale(1); } }
+  .bar-track { height: 20px; background: var(--surface-hi); border-radius: 999px; overflow: hidden; position: relative; }
+  .bar-fill {
+    height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), #7fa8f5);
+    transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .vote-btn {
+    margin-top: 6px; background: var(--surface-hi); border: 1px solid var(--border); color: var(--text);
+    font-size: 12px; padding: 5px 12px; border-radius: 6px; cursor: pointer;
+  }
+  .vote-btn:hover { border-color: var(--accent); }
+  .vote-btn.voted { background: var(--accent); border-color: var(--accent); }
+  .vote-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .footer-stats { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--text-dim); margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
+  .pending-tag { font-size: 10px; color: var(--accent); margin-left: 6px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+
+const { useState, useEffect, useRef, useCallback } = React;
+
+const OPTIONS = [
+  { id: "react", label: "React" },
+  { id: "vue", label: "Vue" },
+  { id: "svelte", label: "Svelte" },
+  { id: "angular", label: "Angular" },
+];
+
+function createMockServer(onMessage) {
+  let seq = 0;
+  const counts = { react: 812, vue: 430, svelte: 205, angular: 140 };
+  const confirmedClientIds = [];
+  let stopped = false;
+
+  function broadcastSnapshot(extraConfirmed) {
+    seq += 1;
+    const msg = {
+      type: "snapshot",
+      seq,
+      counts: { ...counts },
+      confirmedClientIds: extraConfirmed ? [...confirmedClientIds, ...extraConfirmed] : [],
+    };
+    confirmedClientIds.length = 0;
+
+    const delay = Math.random() < 0.15 ? 400 + Math.random() * 500 : 20 + Math.random() * 60;
+    setTimeout(() => { if (!stopped) onMessage(msg); }, delay);
+  }
+
+  const ambientInterval = setInterval(() => {
+    if (stopped) return;
+    const opt = OPTIONS[Math.floor(Math.random() * OPTIONS.length)];
+    counts[opt.id] += 1;
+    broadcastSnapshot();
+  }, 120 + Math.random() * 100);
+
+  return {
+    submitVote(optionId, clientVoteId) {
+      const delay = 300 + Math.random() * 500;
+      setTimeout(() => {
+        if (stopped) return;
+        counts[optionId] += 1;
+        confirmedClientIds.push(clientVoteId);
+        broadcastSnapshot([clientVoteId]);
+      }, delay);
+    },
+    close() {
+      stopped = true;
+      clearInterval(ambientInterval);
+    },
+  };
+}
+
+function PollWidget() {
+  const [authoritative, setAuthoritative] = useState({ react: 812, vue: 430, svelte: 205, angular: 140 });
+  const [pendingVotes, setPendingVotes] = useState({});
+  const [myVote, setMyVote] = useState(null);
+  const [bumpedOption, setBumpedOption] = useState(null);
+  const [connected, setConnected] = useState(true);
+
+  const lastAppliedSeqRef = useRef(0);
+  const messageQueueRef = useRef([]);
+  const serverRef = useRef(null);
+  const prevDisplayRef = useRef({});
+
+  useEffect(() => {
+    const server = createMockServer((msg) => {
+      messageQueueRef.current.push(msg);
+    });
+    serverRef.current = server;
+
+    const flushInterval = setInterval(() => {
+      const queue = messageQueueRef.current;
+      if (queue.length === 0) return;
+      messageQueueRef.current = [];
+
+      let best = null;
+      let confirmedIds = [];
+      for (const msg of queue) {
+        confirmedIds = confirmedIds.concat(msg.confirmedClientIds || []);
+        if (msg.seq > lastAppliedSeqRef.current && (!best || msg.seq > best.seq)) {
+          best = msg;
+        }
+      }
+
+      if (best) {
+        lastAppliedSeqRef.current = best.seq;
+        setAuthoritative(best.counts);
+      }
+      if (confirmedIds.length > 0) {
+        setPendingVotes((prev) => {
+          const next = { ...prev };
+          confirmedIds.forEach((id) => delete next[id]);
+          return next;
+        });
+      }
+    }, 150);
+
+    return () => {
+      clearInterval(flushInterval);
+      server.close();
+    };
+  }, []);
+
+  const submitVote = useCallback((optionId) => {
+    const clientVoteId = "v-" + Math.random().toString(36).slice(2);
+    setPendingVotes((prev) => ({ ...prev, [clientVoteId]: optionId }));
+    setMyVote(optionId);
+    serverRef.current && serverRef.current.submitVote(optionId, clientVoteId);
+  }, []);
+
+  const displayCounts = {};
+  OPTIONS.forEach((o) => { displayCounts[o.id] = authoritative[o.id] || 0; });
+  Object.values(pendingVotes).forEach((optId) => {
+    displayCounts[optId] = (displayCounts[optId] || 0) + 1;
+  });
+
+  const total = OPTIONS.reduce((sum, o) => sum + displayCounts[o.id], 0);
+
+  useEffect(() => {
+    for (const o of OPTIONS) {
+      const prevVal = prevDisplayRef.current[o.id];
+      if (prevVal !== undefined && displayCounts[o.id] > prevVal) {
+        setBumpedOption(o.id);
+        setTimeout(() => setBumpedOption((b) => (b === o.id ? null : b)), 350);
+      }
+    }
+    prevDisplayRef.current = { ...displayCounts };
+  });
+
+  const pendingCount = Object.keys(pendingVotes).length;
+
+  return (
+    <div>
+      <h1>Framework Popularity Poll</h1>
+      <div className="sub">Live results streaming over a mock WebSocket connection.</div>
+      <div className="conn-row">
+        <span className="dot" />
+        <span>Connected · {total.toLocaleString()} total votes</span>
+        {pendingCount > 0 && <span className="pending-tag">{pendingCount} vote(s) pending confirmation</span>}
+      </div>
+
+      <div className="card">
+        {OPTIONS.map((o) => {
+          const count = displayCounts[o.id];
+          const pct = total > 0 ? (count / total) * 100 : 0;
+          return (
+            <div className="option-row" key={o.id}>
+              <div className="option-top">
+                <span className="option-label">{o.label}</span>
+                <span className={"option-count" + (bumpedOption === o.id ? " bump" : "")}>
+                  {count.toLocaleString()} · {pct.toFixed(1)}%
+                </span>
+              </div>
+              <div className="bar-track">
+                <div className="bar-fill" style={{ width: pct + "%" }} />
+              </div>
+              <button
+                className={"vote-btn" + (myVote === o.id ? " voted" : "")}
+                onClick={() => submitVote(o.id)}
+              >
+                {myVote === o.id ? "Your vote ✓" : "Vote"}
+              </button>
+            </div>
+          );
+        })}
+
+        <div className="footer-stats">
+          <span>Renders throttled to ~150ms batches</span>
+          <span>Last applied seq: {lastAppliedSeqRef.current}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<PollWidget />);
+</script>
+</body>
+</html>

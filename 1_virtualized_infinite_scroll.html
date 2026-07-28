@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Virtualized Infinite Scroll Feed</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.23.4/babel.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115;
+    --surface: #171a21;
+    --surface-hi: #1f232c;
+    --border: #2a2f3a;
+    --text: #e7e9ee;
+    --text-dim: #9aa1ad;
+    --accent: #5b8def;
+    --danger: #e05a5a;
+    --success: #4caf7d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #root { max-width: 720px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--text-dim); font-size: 13px; margin-bottom: 16px; }
+  .stats { display: flex; gap: 16px; font-size: 12px; color: var(--text-dim); margin-bottom: 12px; }
+  .stats b { color: var(--text); }
+  .viewport {
+    height: 70vh;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+    position: relative;
+  }
+
+  .spacer { position: relative; width: 100%; }
+  .row {
+    position: absolute;
+    left: 0; right: 0;
+    display: flex;
+    gap: 12px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+  }
+  .avatar {
+    width: 36px; height: 36px; border-radius: 8px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px; color: #fff;
+  }
+  .row-body { min-width: 0; flex: 1; }
+  .row-title { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-sub { font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-index { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; width: 46px; text-align: right; }
+  .footer-row {
+    position: absolute; left: 0; right: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 12px; color: var(--text-dim); gap: 8px;
+  }
+  .spinner {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .retry-btn {
+    background: var(--danger); color: white; border: none; border-radius: 6px;
+    padding: 6px 12px; font-size: 12px; cursor: pointer;
+  }
+  .retry-btn:hover { opacity: 0.85; }
+  .end-msg { color: var(--text-dim); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+
+const { useState, useRef, useEffect, useCallback, useMemo } = React;
+
+const TOTAL_ITEMS = 12000;
+const PAGE_SIZE = 50;
+
+function colorFor(id) {
+  const hues = ["#5b8def", "#e0955a", "#8e5be0", "#4caf7d", "#e05a8f", "#5ad0e0"];
+  return hues[id % hues.length];
+}
+
+function fetchPage(pageIndex) {
+  return new Promise((resolve, reject) => {
+    const delay = 400 + Math.random() * 500;
+    setTimeout(() => {
+      const start = pageIndex * PAGE_SIZE;
+      if (start >= TOTAL_ITEMS) {
+        resolve({ items: [], done: true });
+        return;
+      }
+      if (Math.random() < 0.12) {
+        reject(new Error("Network hiccup fetching page " + pageIndex));
+        return;
+      }
+      const end = Math.min(start + PAGE_SIZE, TOTAL_ITEMS);
+      const items = [];
+      for (let i = start; i < end; i++) {
+        const label = i % 4 === 0 ? "H" : i % 4 === 1 ? "H" : i % 4 === 2 ? "H" : "H";
+        items.push({
+          id: i,
+          title: "Panna item #" + i + " · " + label,
+          sub: "Shared by " + (i % 137 === 0 ? "Panna" : "user_" + (i % 137)) + " · " + (1 + (i % 59)) + "m ago",
+        });
+      }
+      resolve({ items, done: end >= TOTAL_ITEMS });
+    }, delay);
+  });
+}
+
+const ROW_HEIGHT = 60;
+const OVERSCAN = 6;
+
+function InfiniteFeed() {
+  const [items, setItems] = useState([]);
+  const [nextPage, setNextPage] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [done, setDone] = useState(false);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+
+  const viewportRef = useRef(null);
+  const loadingRef = useRef(false);
+
+  const loadNextPage = useCallback(() => {
+    if (loadingRef.current || done) return;
+    loadingRef.current = true;
+    setLoading(true);
+    setError(null);
+    fetchPage(nextPage)
+      .then((res) => {
+        setItems((prev) => prev.concat(res.items));
+        setNextPage((p) => p + 1);
+        if (res.done) setDone(true);
+      })
+      .catch((err) => {
+        setError(err.message);
+      })
+      .finally(() => {
+        loadingRef.current = false;
+        setLoading(false);
+      });
+  }, [nextPage, done]);
+
+  useEffect(() => { loadNextPage(); }, []);
+
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const measure = () => setViewportHeight(el.clientHeight);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const handleScroll = useCallback((e) => {
+    const el = e.target;
+    setScrollTop(el.scrollTop);
+
+    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceToBottom < ROW_HEIGHT * 4 && !loadingRef.current && !done && !error) {
+      loadNextPage();
+    }
+  }, [loadNextPage, done, error]);
+
+  const totalContentHeight = items.length * ROW_HEIGHT;
+  const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+  const visibleCount = Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN * 2;
+  const endIndex = Math.min(items.length, startIndex + visibleCount);
+
+  const visibleItems = useMemo(
+    () => items.slice(startIndex, endIndex),
+    [items, startIndex, endIndex]
+  );
+
+  const retry = () => {
+    setError(null);
+    loadNextPage();
+  };
+
+  return (
+    <div>
+      <h1>Virtualized Infinite Scroll Feed</h1>
+      <div className="sub">{TOTAL_ITEMS.toLocaleString()} total items · only ~{visibleCount} rows ever mounted in the DOM</div>
+      <div className="stats">
+        <span>Loaded: <b>{items.length.toLocaleString()}</b></span>
+        <span>Rendered rows: <b>{visibleItems.length}</b></span>
+        <span>Page: <b>{nextPage}</b></span>
+      </div>
+      <div
+        className="viewport"
+        ref={viewportRef}
+        onScroll={handleScroll}
+      >
+        <div className="spacer" style={{ height: totalContentHeight + (loading || error || done ? 44 : 0) }}>
+          {visibleItems.map((item, i) => {
+            const index = startIndex + i;
+            return (
+              <div
+                key={item.id}
+                className="row"
+                style={{ top: index * ROW_HEIGHT, height: ROW_HEIGHT }}
+              >
+                <div className="row-index">{item.id}</div>
+                <div className="avatar" style={{ background: colorFor(item.id) }}>
+                  {("U" + (item.id % 137)).slice(0, 2).toUpperCase()}
+                </div>
+                <div className="row-body">
+                  <div className="row-title">{item.title}</div>
+                  <div className="row-sub">{item.sub}</div>
+                </div>
+              </div>
+            );
+          })}
+
+          <div className="footer-row" style={{ top: totalContentHeight, height: 44 }}>
+            {loading && (
+              <>
+                <div className="spinner" />
+                <span>Loading more…</span>
+              </>
+            )}
+            {error && !loading && (
+              <>
+                <span style={{ color: "var(--danger)" }}>{error}</span>
+                <button className="retry-btn" onClick={retry}>Retry</button>
+              </>
+            )}
+            {done && !loading && !error && (
+              <span className="end-msg">— End of feed —</span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<InfiniteFeed />);
+</script>
+</body>
+</html>
